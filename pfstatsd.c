@@ -156,7 +156,8 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   stats_add(stats, &stats_cur);
 }
 
-int step(int dev, struct pfioc_states *ps, struct pfioc_states *ps_prev) {
+int step(int dev, struct pfioc_states *ps, struct pfioc_states *ps_prev,
+         struct pfstats *stats) {
   if (pfctl_state_get(dev, ps) == -1) {
     err(1, "pfctl_state_get");
   }
@@ -168,46 +169,110 @@ int step(int dev, struct pfioc_states *ps, struct pfioc_states *ps_prev) {
   size_t n_prev = ps_prev->ps_len / sz;
   size_t i = 0, i_prev = 0;
 
-  struct pfstats stats;
-  memset(&stats, 0, sizeof(stats));
-
   // compare sorted array
   while (i < n || i_prev < n_prev) {
     struct pfsync_state *s = (struct pfsync_state *)(ps->ps_buf + i * sz);
     struct pfsync_state *s_prev =
         (struct pfsync_state *)(ps_prev->ps_buf + i_prev * sz);
     if (i == n) {
-      states_cmp(&stats, NULL, s_prev);
+      states_cmp(stats, NULL, s_prev);
       i_prev += 1;
     } else if (i_prev == n_prev) {
-      states_cmp(&stats, s, NULL);
+      states_cmp(stats, s, NULL);
       i += 1;
     } else if (s->id > s_prev->id) {
-      states_cmp(&stats, NULL, s_prev);
+      states_cmp(stats, NULL, s_prev);
       i_prev += 1;
     } else if (s->id < s_prev->id) {
-      states_cmp(&stats, s, NULL);
+      states_cmp(stats, s, NULL);
       i += 1;
     } else {
       assert(s->id == s_prev->id);
 
-      states_cmp(&stats, s, s_prev);
+      states_cmp(stats, s, s_prev);
       i += 1;
       i_prev += 1;
     }
   }
 
-  stats_print(&stats);
-
   return 0;
 }
 
-int main(void) {
+int send_msg(int sockfd, struct sockaddr_in *addr, const void *data,
+             size_t datalen) {
+  return sendto(sockfd, data, datalen, 0, (const struct sockaddr *)addr,
+                sizeof(struct sockaddr_in));
+}
+
+void send_counter(int sockfd, struct sockaddr_in *addr, const char *name,
+                  size_t counter) {
+  char buf[1024];
+  int ret = snprintf(buf, sizeof(buf), "%s:%lu|c\n", name, counter);
+  if (ret == sizeof(buf) - 1) {
+    err(1, "snprintf");
+  }
+  ret = send_msg(sockfd, addr, buf, ret);
+  if (ret == -1) {
+    err(1, "send_msg");
+  }
+}
+
+__dead void usage(void) {
+  extern char *__progname;
+
+  fprintf(stderr, "usage: %s [-hp] ", __progname);
+  exit(1);
+}
+
+int main(int argc, char *argv[]) {
+  const char *errstr;
+  int ch;
+
+  char *host = "127.0.0.1";
+  uint16_t port = 12345;
+
+  while ((ch = getopt(argc, argv, "h:p:")) != -1) {
+    switch (ch) {
+    case 'h':
+      host = optarg;
+      break;
+    case 'p':
+      port = strtonum(optarg, -1, 65535, &errstr);
+      if (errstr) {
+        err(1, "invalid port: %s", errstr);
+      }
+      break;
+    default:
+      usage();
+      /* NOTREACHED */
+    }
+  }
+
   int dev = -1;
   int mode = O_RDONLY;
   dev = open(pf_device, mode);
   if (dev == -1) {
     err(1, "%s", pf_device);
+  }
+
+  int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sockfd == -1) {
+    err(1, "socket");
+  }
+
+  struct sockaddr_in server;
+  bzero((char *)&server, sizeof(server));
+  server.sin_family = AF_INET;
+  server.sin_addr.s_addr = inet_addr(host);
+  server.sin_port = htons(port);
+
+  char *data = "hello world\n";
+  size_t datalen = strlen(data);
+
+  int ret = sendto(sockfd, data, datalen, 0, (const struct sockaddr *)&server,
+                   sizeof(server));
+  if (ret == -1) {
+    err(1, "sendto");
   }
 
   struct pfioc_states ps0, ps1;
@@ -216,8 +281,17 @@ int main(void) {
 
   struct pfioc_states *ps = &ps0, *ps_prev = &ps1, *tmp = NULL;
 
+  struct pfstats stats;
+
   for (;;) {
-    step(dev, ps, ps_prev);
+    memset(&stats, 0, sizeof(stats));
+    step(dev, ps, ps_prev, &stats);
+
+    stats_print(&stats);
+    send_counter(sockfd, &server, "bytes_in", stats.bytes[0]);
+    send_counter(sockfd, &server, "bytes_out", stats.bytes[1]);
+    send_counter(sockfd, &server, "packets_in", stats.packets[0]);
+    send_counter(sockfd, &server, "packets_out", stats.packets[1]);
 
     // swap buffer
     tmp = ps;
@@ -230,6 +304,7 @@ int main(void) {
   free(ps0.ps_buf);
   free(ps1.ps_buf);
 
+  close(sockfd);
   close(dev);
   return 0;
 }
