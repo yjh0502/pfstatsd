@@ -2,4 +2,5 @@ a.out*
 .cache
 *.core
 pfstatsd
+rrd
 compile_commands.json

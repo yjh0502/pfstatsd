@@ -23,7 +23,12 @@
 #include <syslog.h>
 #include <unistd.h>
 
-char *pf_device = "/dev/pf";
+#include <rrd.h>
+#include <rrd_client.h>
+
+const char *pf_device = "/dev/pf";
+const char *rrdcached_addr = "/var/run/rrdcached.sock";
+const char *rrd_filename = "/var/db/rrd/pf.rrd";
 struct subnetrepr repr;
 
 void print_addr(sa_family_t af, void *src);
@@ -113,6 +118,13 @@ void stats_sub(struct pfstats *s0, struct pfstats *s1) {
   for (int i = 0; i < 2; i++) {
     s0->packets[i] = s0->packets[i] - s1->packets[i];
     s0->bytes[i] = s0->bytes[i] - s1->bytes[i];
+  }
+}
+
+void stats_add(struct pfstats *s0, struct pfstats *s1) {
+  for (int i = 0; i < 2; i++) {
+    s0->packets[i] = s0->packets[i] + s1->packets[i];
+    s0->bytes[i] = s0->bytes[i] + s1->bytes[i];
   }
 }
 
@@ -268,8 +280,8 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   }
 
   if (cur == NULL) {
-    printf("DEL ");
-    state_print_debug(prev);
+    // printf("DEL ");
+    // state_print_debug(prev);
     return;
   }
 
@@ -277,8 +289,8 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   stats_fill(&stats_cur, cur);
 
   if (prev == NULL) {
-    printf("ADD ");
-    state_print_debug(cur);
+    // printf("ADD ");
+    // state_print_debug(cur);
 
     memset(&stats_prev, 0, sizeof(struct pfstats));
   } else {
@@ -375,27 +387,37 @@ __dead void usage(void) {
   exit(1);
 }
 
+void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
+  int ret, t;
+  char buf[1024];
+
+  t = time(NULL);
+
+  ret = snprintf(buf, sizeof(buf), "%d:%llu:%llu:%llu:%llu",
+      t, stats.bytes[0], stats.bytes[1], stats.packets[0], stats.packets[1]);
+
+  if (ret == sizeof(buf) - 1) {
+    errx(1, "snprintf");
+  }
+  printf("%s\n", buf);
+
+  const char *updates[1] = {buf};
+  if ((ret = rrd_client_update(client, rrd_filename, 1, updates))) {
+    errx(ret, "rrd_client_update");
+  }
+  if ((ret = rrd_client_flush(client, rrd_filename))) {
+    errx(ret, "rrd_client_flushall");
+  }
+}
+
 int main(int argc, char *argv[]) {
   char *addr = NULL;
-  const char *errstr;
   int ch;
 
-  char *host = "127.0.0.1";
-  uint16_t port = 12345;
-
-  while ((ch = getopt(argc, argv, "n:h:p:")) != -1) {
+  while ((ch = getopt(argc, argv, "n:")) != -1) {
     switch (ch) {
     case 'n':
       addr = strdup(optarg);
-      break;
-    case 'h':
-      host = optarg;
-      break;
-    case 'p':
-      port = strtonum(optarg, -1, 65535, &errstr);
-      if (errstr) {
-        err(1, "invalid port: %s", errstr);
-      }
       break;
     default:
       usage();
@@ -422,19 +444,23 @@ int main(int argc, char *argv[]) {
     err(1, "socket");
   }
 
+  /*
   struct sockaddr_in server;
   bzero((char *)&server, sizeof(server));
   server.sin_family = AF_INET;
   server.sin_addr.s_addr = inet_addr(host);
   server.sin_port = htons(port);
+  */
+  int ret;
+  rrd_client_t *client = rrd_client_new(NULL);
 
-  char *data = "hello world\n";
-  size_t datalen = strlen(data);
+  if (client == NULL) {
+    errx(1, "rrd_client_new");
+  }
 
-  int ret = sendto(sockfd, data, datalen, 0, (const struct sockaddr *)&server,
-                   sizeof(server));
-  if (ret == -1) {
-    err(1, "sendto");
+  ret = rrd_client_connect(client, rrdcached_addr);
+  if (ret) {
+    errx(1, "rrd_client_connect");
   }
 
   struct pfioc_states ps0, ps1;
@@ -443,7 +469,8 @@ int main(int argc, char *argv[]) {
 
   struct pfioc_states *ps = &ps0, *ps_prev = &ps1, *tmp = NULL;
 
-  struct pfstats stats;
+  struct pfstats stats, stats_acc;
+  memset(&stats_acc, 0, sizeof(stats_acc));
 
   // warm up
   if (pfctl_state_get(dev, ps_prev) == -1) {
@@ -456,11 +483,10 @@ int main(int argc, char *argv[]) {
     step(dev, ps, ps_prev, &stats);
 
     stats_print(&stats);
+    stats_add(&stats_acc, &stats);
     printf("\n");
-    send_counter(sockfd, &server, "bytes_in", stats.bytes[0]);
-    send_counter(sockfd, &server, "bytes_out", stats.bytes[1]);
-    send_counter(sockfd, &server, "packets_in", stats.packets[0]);
-    send_counter(sockfd, &server, "packets_out", stats.packets[1]);
+
+    rrd_update_stats(client, stats_acc);
 
     // swap buffer
     tmp = ps;
