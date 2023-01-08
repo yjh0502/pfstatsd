@@ -1,4 +1,5 @@
 a.out*
 .cache
+*.core
 pfstatsd
 compile_commands.json

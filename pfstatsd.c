@@ -24,6 +24,102 @@
 #include <unistd.h>
 
 char *pf_device = "/dev/pf";
+struct subnetrepr repr;
+
+void print_addr(sa_family_t af, void *src);
+
+struct subnetrepr {
+  struct pf_addr addr;
+  struct pf_addr mask;
+};
+
+// ipv4 only
+int subnetrepr_parse(struct subnetrepr *repr, char *addr) {
+  char *p;
+  const char *errstr;
+  int prefix, ret_ga;
+  struct addrinfo hints, *res, *iter;
+
+  bzero(&hints, sizeof(hints));
+  hints.ai_socktype = SOCK_DGRAM; /* dummy */
+  hints.ai_flags = AI_NUMERICHOST;
+
+  if ((p = strchr(addr, '/')) != NULL) {
+    *p++ = '\0';
+  }
+
+  if ((ret_ga = getaddrinfo(addr, NULL, &hints, &res))) {
+    errx(1, "getaddrinfo: %s", gai_strerror(ret_ga));
+    /* NOTREACHED */
+  }
+
+  iter = res;
+  while (iter->ai_next == NULL) {
+    if (iter->ai_family == AF_INET) {
+      repr->addr.v4 = ((struct sockaddr_in *)iter->ai_addr)->sin_addr;
+      break;
+    }
+    iter = iter->ai_next;
+  }
+  freeaddrinfo(res);
+
+  if (iter == NULL) {
+    return -1;
+  }
+
+  repr->mask.v4.s_addr = (u_int32_t)0xffffffffffULL;
+  if (p == NULL) {
+    return 0;
+  }
+
+  prefix = strtonum(p, 0, res->ai_family == AF_INET6 ? 128 : 32, &errstr);
+  if (errstr) {
+    errx(1, "prefix is %s: %s", errstr, p);
+  }
+
+  repr->mask.v4.s_addr = htonl((u_int32_t)(0xffffffffffULL << (32 - prefix)));
+
+  return 0;
+}
+
+// return 1 if matches
+int subnetrepr_match(struct subnetrepr *repr, struct pf_addr *addr) {
+  u_int32_t v4_repr_addr = (*(u_int32_t *)(&repr->addr.v4));
+  u_int32_t v4_repr_mask = (*(u_int32_t *)(&repr->mask.v4));
+  u_int32_t v4_addr = (*(u_int32_t *)(&addr->v4));
+
+  if ((v4_repr_addr & v4_repr_mask) == (v4_addr & v4_repr_mask)) {
+    return 1;
+  }
+  return 0;
+}
+
+struct pfstats {
+  u_int64_t packets[2];
+  u_int64_t bytes[2];
+};
+
+void stats_fill(struct pfstats *stats, struct pfsync_state *state) {
+  for (int i = 0; i < 2; i++) {
+    bcopy(state->packets[i], &stats->packets[i], sizeof(u_int64_t));
+    stats->packets[i] = betoh64(stats->packets[i]);
+
+    bcopy(state->bytes[i], &stats->bytes[i], sizeof(u_int64_t));
+    stats->bytes[i] = betoh64(stats->bytes[i]);
+  }
+}
+
+void stats_sub(struct pfstats *s0, struct pfstats *s1) {
+  for (int i = 0; i < 2; i++) {
+    s0->packets[i] = s0->packets[i] - s1->packets[i];
+    s0->bytes[i] = s0->bytes[i] - s1->bytes[i];
+  }
+}
+
+void stats_print(struct pfstats *s) {
+  printf("bytes=%llu:%llu, packets=%llu:%llu", s->bytes[0], s->bytes[1],
+         s->packets[0], s->packets[1]);
+}
 
 int pfctl_state_get(int dev, struct pfioc_states *ps) {
   char *inbuf = ps->ps_buf, *newinbuf = NULL;
@@ -82,7 +178,19 @@ void states_sort(struct pfioc_states *ps) {
   qsort(ps->ps_buf, n, sizeof(struct pfsync_state), pfsync_state_cmp_id);
 }
 
+void state_print_key(struct pfsync_state_key *key, int idx) {
+  print_addr(key->af, &key->addr[idx]);
+  printf(":%d", ntohs(key->port[idx]));
+}
+
 void state_print_debug(struct pfsync_state *s) {
+  struct pfsync_state_key *nk;
+  if (s->direction == PF_OUT) {
+    nk = &s->key[PF_SK_WIRE];
+  } else {
+    nk = &s->key[PF_SK_STACK];
+  }
+
   printf("%llu %s ", s->id, s->ifname);
   if (s->proto == 6) {
     printf("tcp ");
@@ -92,68 +200,111 @@ void state_print_debug(struct pfsync_state *s) {
     printf("proto=%d ", s->proto);
   }
 
-  print_addr(s->af, &s->key[0].addr[0]);
-  printf(":%d", ntohs(s->key[0].port[0]));
-  printf(" / ");
-  print_addr(s->af, &s->key[0].addr[1]);
-  printf(":%d", ntohs(s->key[0].port[1]));
+  state_print_key(nk, 1);
 
+  if (s->direction == PF_OUT) {
+    printf(" -> ");
+  } else {
+    printf(" <- ");
+  }
+
+  state_print_key(nk, 0);
+  printf(" ");
+
+  struct pfstats stats;
+  stats_fill(&stats, s);
+  stats_print(&stats);
   printf("\n");
 }
 
-struct pfstats {
-  u_int64_t packets[2];
-  u_int64_t bytes[2];
-};
+// return 1 if non-NATed simple flow
+int state_simple_idx(struct pfsync_state *s, int idx) {
+  struct pfsync_state_key *sk, *nk;
 
-void stats_fill(struct pfstats *stats, struct pfsync_state *state) {
-  for (int i = 0; i < 2; i++) {
-    bcopy(state->packets[i], &stats->packets[i], sizeof(u_int64_t));
-    stats->packets[i] = betoh64(stats->packets[i]);
+  sk = &s->key[PF_SK_STACK];
+  nk = &s->key[PF_SK_WIRE];
 
-    bcopy(state->bytes[i], &stats->bytes[i], sizeof(u_int64_t));
-    stats->bytes[i] = betoh64(stats->bytes[i]);
+  if (sk->af != nk->af || PF_ANEQ(&sk->addr[idx], &nk->addr[idx], sk->af) ||
+      sk->port[idx] != nk->port[idx] || sk->rdomain != nk->rdomain) {
+    return 0;
   }
+  return 1;
 }
 
-void stats_sub(struct pfstats *s0, struct pfstats *s1) {
-  for (int i = 0; i < 2; i++) {
-    s0->packets[i] = s0->packets[i] - s1->packets[i];
-    s0->bytes[i] = s0->bytes[i] - s1->bytes[i];
+// return 1 if non-nated simple flow
+int state_simple(struct pfsync_state *s) {
+  if (s->af != AF_INET) {
+    return 0;
   }
+  if (state_simple_idx(s, 0) && state_simple_idx(s, 1)) {
+    return 1;
+  }
+  return 0;
 }
 
-void stats_add(struct pfstats *s0, struct pfstats *s1) {
-  for (int i = 0; i < 2; i++) {
-    s0->packets[i] = s0->packets[i] + s1->packets[i];
-    s0->bytes[i] = s0->bytes[i] + s1->bytes[i];
-  }
-}
+void acct_for(struct pf_addr *src, struct pf_addr *dst, u_int64_t bytes,
+              u_int64_t packets, struct pfstats *stats) {
+  int src_local = subnetrepr_match(&repr, src);
+  int dst_local = subnetrepr_match(&repr, dst);
 
-void stats_print(struct pfstats *s) {
-  printf("bytes=%llu:%llu, packets=%llu:%llu\n", s->bytes[0], s->bytes[1],
-         s->packets[0], s->packets[1]);
+  if (src_local == dst_local) {
+    return;
+  }
+
+  if (src_local) {
+    stats->bytes[0] += bytes;
+    stats->packets[0] += packets;
+  } else {
+    stats->bytes[1] += bytes;
+    stats->packets[1] += packets;
+  }
 }
 
 void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
                 struct pfsync_state *prev) {
+  struct pfsync_state *s = cur != NULL ? cur : prev;
+  if (!state_simple(s)) {
+    return;
+  }
+
   if (cur == NULL) {
     printf("DEL ");
     state_print_debug(prev);
     return;
   }
-  if (prev == NULL) {
-    printf("ADD ");
-    state_print_debug(cur);
-    return;
-  }
 
   struct pfstats stats_cur, stats_prev;
   stats_fill(&stats_cur, cur);
-  stats_fill(&stats_prev, prev);
 
+  if (prev == NULL) {
+    printf("ADD ");
+    state_print_debug(cur);
+
+    memset(&stats_prev, 0, sizeof(struct pfstats));
+  } else {
+    stats_fill(&stats_prev, prev);
+  }
   stats_sub(&stats_cur, &stats_prev);
-  stats_add(stats, &stats_cur);
+
+  int afto = s->key[PF_SK_STACK].af == s->key[PF_SK_WIRE].af ? 0 : 1;
+  int dir = afto ? PF_OUT : s->direction;
+
+  uint64_t bytes, packets;
+  struct pfsync_state_key *ks;
+
+  bytes = (dir == PF_OUT) ? stats_cur.bytes[0] : stats_cur.bytes[1];
+  packets = (dir == PF_OUT) ? stats_cur.packets[0] : stats_cur.packets[1];
+  if (bytes > 0) {
+    ks = &s->key[afto ? PF_SK_STACK : PF_SK_WIRE];
+    acct_for(&ks->addr[1], &ks->addr[0], bytes, packets, stats);
+  }
+
+  bytes = (dir == PF_OUT) ? stats_cur.bytes[1] : stats_cur.bytes[0];
+  packets = (dir == PF_OUT) ? stats_cur.packets[1] : stats_cur.packets[0];
+  if (bytes > 0) {
+    ks = &s->key[PF_SK_STACK];
+    acct_for(&ks->addr[0], &ks->addr[1], bytes, packets, stats);
+  }
 }
 
 int step(int dev, struct pfioc_states *ps, struct pfioc_states *ps_prev,
@@ -225,14 +376,18 @@ __dead void usage(void) {
 }
 
 int main(int argc, char *argv[]) {
+  char *addr = NULL;
   const char *errstr;
   int ch;
 
   char *host = "127.0.0.1";
   uint16_t port = 12345;
 
-  while ((ch = getopt(argc, argv, "h:p:")) != -1) {
+  while ((ch = getopt(argc, argv, "n:h:p:")) != -1) {
     switch (ch) {
+    case 'n':
+      addr = strdup(optarg);
+      break;
     case 'h':
       host = optarg;
       break;
@@ -247,6 +402,13 @@ int main(int argc, char *argv[]) {
       /* NOTREACHED */
     }
   }
+
+  if (addr == NULL) {
+    usage();
+  }
+
+  memset(&repr, 0, sizeof(struct subnetrepr));
+  subnetrepr_parse(&repr, addr);
 
   int dev = -1;
   int mode = O_RDONLY;
@@ -283,11 +445,18 @@ int main(int argc, char *argv[]) {
 
   struct pfstats stats;
 
+  // warm up
+  if (pfctl_state_get(dev, ps_prev) == -1) {
+    err(1, "pfctl_state_get");
+  }
+  states_sort(ps_prev);
+
   for (;;) {
     memset(&stats, 0, sizeof(stats));
     step(dev, ps, ps_prev, &stats);
 
     stats_print(&stats);
+    printf("\n");
     send_counter(sockfd, &server, "bytes_in", stats.bytes[0]);
     send_counter(sockfd, &server, "bytes_out", stats.bytes[1]);
     send_counter(sockfd, &server, "packets_in", stats.packets[0]);
