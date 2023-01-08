@@ -27,7 +27,7 @@
 #include <rrd_client.h>
 
 const char *pf_device = "/dev/pf";
-const char *rrdcached_addr = "/var/run/rrdcached.sock";
+const char *rrdcached_addr = "/var/run/rrd/rrdcached.sock";
 const char *rrd_filename = "/var/db/rrd/pf.rrd";
 struct subnetrepr repr;
 
@@ -393,8 +393,8 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
 
   t = time(NULL);
 
-  ret = snprintf(buf, sizeof(buf), "%d:%llu:%llu:%llu:%llu",
-      t, stats.bytes[0], stats.bytes[1], stats.packets[0], stats.packets[1]);
+  ret = snprintf(buf, sizeof(buf), "%d:%llu:%llu:%llu:%llu", t, stats.bytes[0],
+                 stats.bytes[1], stats.packets[0], stats.packets[1]);
 
   if (ret == sizeof(buf) - 1) {
     errx(1, "snprintf");
