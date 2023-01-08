@@ -383,7 +383,7 @@ void send_counter(int sockfd, struct sockaddr_in *addr, const char *name,
 __dead void usage(void) {
   extern char *__progname;
 
-  fprintf(stderr, "usage: %s [-hp] ", __progname);
+  fprintf(stderr, "usage: %s [-n network] [-d]", __progname);
   exit(1);
 }
 
@@ -399,7 +399,6 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
   if (ret == sizeof(buf) - 1) {
     errx(1, "snprintf");
   }
-  printf("%s\n", buf);
 
   const char *updates[1] = {buf};
   if ((ret = rrd_client_update(client, rrd_filename, 1, updates))) {
@@ -413,15 +412,19 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
 int main(int argc, char *argv[]) {
   char *addr = NULL;
   int ch;
+  int daemonize = 1;
 
-  while ((ch = getopt(argc, argv, "n:")) != -1) {
+  while ((ch = getopt(argc, argv, "dn:")) != -1) {
     switch (ch) {
+    case 'd':
+      daemonize = 0;
+      continue;
     case 'n':
       addr = strdup(optarg);
-      break;
+      continue;
     default:
-      usage();
       /* NOTREACHED */
+      usage();
     }
   }
 
@@ -444,13 +447,6 @@ int main(int argc, char *argv[]) {
     err(1, "socket");
   }
 
-  /*
-  struct sockaddr_in server;
-  bzero((char *)&server, sizeof(server));
-  server.sin_family = AF_INET;
-  server.sin_addr.s_addr = inet_addr(host);
-  server.sin_port = htons(port);
-  */
   int ret;
   rrd_client_t *client = rrd_client_new(NULL);
 
@@ -478,10 +474,24 @@ int main(int argc, char *argv[]) {
   }
   states_sort(ps_prev);
 
+  if (daemonize && (ret = daemon(0, 0))) {
+    errx(1, "daemon");
+  }
+
+  struct timespec ts;
+  struct timeval tv, tv_now, tv_next, tv_interval, tv_sleep;
+
+  gettimeofday(&tv, NULL);
+  tv_interval.tv_sec = 1;
+  tv_interval.tv_usec = 0;
+
+  timeradd(&tv, &tv_interval, &tv_next);
+
   for (;;) {
     memset(&stats, 0, sizeof(stats));
     step(dev, ps, ps_prev, &stats);
 
+    printf("%lld.%ld ", tv_now.tv_sec, tv_now.tv_usec);
     stats_print(&stats);
     stats_add(&stats_acc, &stats);
     printf("\n");
@@ -493,7 +503,19 @@ int main(int argc, char *argv[]) {
     ps = ps_prev;
     ps_prev = tmp;
 
-    sleep(1);
+    // wait
+    gettimeofday(&tv_now, NULL);
+    timersub(&tv_next, &tv_now, &tv_sleep);
+    TIMEVAL_TO_TIMESPEC(&tv_sleep, &ts);
+
+    while ((ret = nanosleep(&ts, NULL))) {
+      if (errno != EINTR) {
+        errx(1, "nanosleep");
+      }
+    }
+
+    tv = tv_next;
+    timeradd(&tv, &tv_interval, &tv_next);
   }
 
   free(ps0.ps_buf);
