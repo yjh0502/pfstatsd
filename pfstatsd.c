@@ -411,7 +411,7 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
 
 int main(int argc, char *argv[]) {
   char *addr = NULL;
-  int ch;
+  int ret, ch;
   int daemonize = 1;
 
   while ((ch = getopt(argc, argv, "dn:")) != -1) {
@@ -447,7 +447,6 @@ int main(int argc, char *argv[]) {
     err(1, "socket");
   }
 
-  int ret;
   rrd_client_t *client = rrd_client_new(NULL);
 
   if (client == NULL) {
