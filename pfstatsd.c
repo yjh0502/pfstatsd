@@ -405,7 +405,7 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
     errx(ret, "rrd_client_update");
   }
   if ((ret = rrd_client_flush(client, rrd_filename))) {
-    errx(ret, "rrd_client_flushall");
+    errx(ret, "rrd_client_flush");
   }
 }
 
@@ -478,19 +478,20 @@ int main(int argc, char *argv[]) {
   }
 
   struct timespec ts;
-  struct timeval tv, tv_now, tv_next, tv_interval, tv_sleep;
+  struct timeval tv, tv_now, tv_interval, tv_sleep;
 
   gettimeofday(&tv, NULL);
   tv_interval.tv_sec = 1;
   tv_interval.tv_usec = 0;
 
-  timeradd(&tv, &tv_interval, &tv_next);
+  timeradd(&tv, &tv_interval, &tv);
 
   for (;;) {
     memset(&stats, 0, sizeof(stats));
     step(dev, ps, ps_prev, &stats);
 
-    printf("%lld.%ld ", tv_now.tv_sec, tv_now.tv_usec);
+    gettimeofday(&tv_now, NULL);
+    printf("%lld.%06ld ", tv_now.tv_sec, tv_now.tv_usec);
     stats_print(&stats);
     stats_add(&stats_acc, &stats);
     printf("\n");
@@ -504,7 +505,7 @@ int main(int argc, char *argv[]) {
 
     // wait
     gettimeofday(&tv_now, NULL);
-    timersub(&tv_next, &tv_now, &tv_sleep);
+    timersub(&tv, &tv_now, &tv_sleep);
     TIMEVAL_TO_TIMESPEC(&tv_sleep, &ts);
 
     while ((ret = nanosleep(&ts, NULL))) {
@@ -513,8 +514,7 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    tv = tv_next;
-    timeradd(&tv, &tv_interval, &tv_next);
+    timeradd(&tv, &tv_interval, &tv);
   }
 
   free(ps0.ps_buf);
