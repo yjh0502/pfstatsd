@@ -387,13 +387,17 @@ __dead void usage(void) {
   exit(1);
 }
 
-void rrd_update_stats(rrd_client_t *client, struct pfstats stats) {
-  int ret, t;
+void rrd_update_stats(rrd_client_t *client, struct pfstats stats, int ts) {
+  int ret;
   char buf[1024];
 
-  t = time(NULL);
+  static int last_ts = 0;
+  if (ts < last_ts) {
+    return;
+  }
+  last_ts = ts;
 
-  ret = snprintf(buf, sizeof(buf), "%d:%llu:%llu:%llu:%llu", t, stats.bytes[0],
+  ret = snprintf(buf, sizeof(buf), "%d:%llu:%llu:%llu:%llu", ts, stats.bytes[0],
                  stats.bytes[1], stats.packets[0], stats.packets[1]);
 
   if (ret == sizeof(buf) - 1) {
@@ -491,12 +495,16 @@ int main(int argc, char *argv[]) {
     step(dev, ps, ps_prev, &stats);
 
     gettimeofday(&tv_now, NULL);
-    printf("%lld.%06ld ", tv_now.tv_sec, tv_now.tv_usec);
-    stats_print(&stats);
-    stats_add(&stats_acc, &stats);
-    printf("\n");
 
-    rrd_update_stats(client, stats_acc);
+    if (daemonize) {
+      printf("%lld.%06ld ", tv_now.tv_sec, tv_now.tv_usec);
+      stats_print(&stats);
+      printf("\n");
+    }
+
+    stats_add(&stats_acc, &stats);
+
+    rrd_update_stats(client, stats_acc, tv_now.tv_sec);
 
     // swap buffer
     tmp = ps;
