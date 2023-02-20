@@ -406,7 +406,7 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats, int ts) {
 
   const char *updates[1] = {buf};
   if ((ret = rrd_client_update(client, rrd_filename, 1, updates))) {
-    errx(ret, "rrd_client_update");
+    warn("rrd_client_update: %d", ret);
   }
   if ((ret = rrd_client_flush(client, rrd_filename))) {
     errx(ret, "rrd_client_flush");
