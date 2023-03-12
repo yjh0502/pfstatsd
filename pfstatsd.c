@@ -496,7 +496,7 @@ int main(int argc, char *argv[]) {
 
     gettimeofday(&tv_now, NULL);
 
-    if (daemonize) {
+    if (!daemonize) {
       printf("%lld.%06ld ", tv_now.tv_sec, tv_now.tv_usec);
       stats_print(&stats);
       printf("\n");
@@ -513,13 +513,17 @@ int main(int argc, char *argv[]) {
 
     // wait
     gettimeofday(&tv_now, NULL);
-    timersub(&tv, &tv_now, &tv_sleep);
-    TIMEVAL_TO_TIMESPEC(&tv_sleep, &ts);
+    if (timercmp(&tv, &tv_now, >)) {
+      timersub(&tv, &tv_now, &tv_sleep);
+      TIMEVAL_TO_TIMESPEC(&tv_sleep, &ts);
 
-    while ((ret = nanosleep(&ts, NULL))) {
-      if (errno != EINTR) {
-        errx(1, "nanosleep");
+      while ((ret = nanosleep(&ts, NULL))) {
+        if (errno != EINTR) {
+          errx(1, "nanosleep: %d", ret);
+        }
       }
+    } else {
+      warn("tv_now(%lld.%06ld) > tv(%lld.%06ld)", tv_now.tv_sec, tv_now.tv_usec, tv.tv_sec, tv.tv_usec);
     }
 
     timeradd(&tv, &tv_interval, &tv);
