@@ -209,7 +209,7 @@ static void parse_interfaces(const char *list) {
   for (char *p = strtok(tmp, ","); p != NULL; p = strtok(NULL, ",")) {
     strlcpy(ifstats[idx].ifname, p, sizeof(ifstats[idx].ifname));
     snprintf(ifstats[idx].rrd_filename, sizeof(ifstats[idx].rrd_filename),
-        "%s/pf-%s.rrd", rrd_filename, ifstats[idx].ifname);
+             "%s/pf-%s.rrd", rrd_filename, ifstats[idx].ifname);
     idx++;
   }
 
@@ -312,7 +312,6 @@ void acct_for(struct pf_addr *src, struct pf_addr *dst, u_int64_t bytes,
   if (src_local == dst_local) {
     return;
   }
-
 
   if (src_local) {
     stats->bytes[0] += bytes;
@@ -473,7 +472,7 @@ void rrd_update_stats(rrd_client_t *client, const char *filename,
   if (verbose) {
     printf("%s: %s\n", filename, buf);
   }
-  
+
   if (dryrun) {
     return;
   }
