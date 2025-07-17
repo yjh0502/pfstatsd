@@ -349,8 +349,7 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   }
   stats_sub(&stats_cur, &stats_prev);
 
-  int afto = s->key[PF_SK_STACK].af == s->key[PF_SK_WIRE].af ? 0 : 1;
-  int dir = afto ? PF_OUT : s->direction;
+  int dir = s->direction;
 
   uint64_t bytes, packets;
   struct pfsync_state_key *ks;
@@ -358,7 +357,7 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   bytes = (dir == PF_OUT) ? stats_cur.bytes[0] : stats_cur.bytes[1];
   packets = (dir == PF_OUT) ? stats_cur.packets[0] : stats_cur.packets[1];
   if (bytes > 0) {
-    ks = &s->key[afto ? PF_SK_STACK : PF_SK_WIRE];
+    ks = &s->key[PF_SK_STACK];
     acct_for(&ks->addr[1], &ks->addr[0], bytes, packets, stats);
     for (int i = 0; i < if_count; i++) {
       if (strcmp(ifstats[i].ifname, s->ifname) == 0) {
