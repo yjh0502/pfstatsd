@@ -1,6 +1,9 @@
+#!/usr/bin/env bash
+
+NAME="${1:-pf.rrd}"
 rrdtool \
 	create \
-	pf.rrd \
+	"${NAME}" \
 	--step 1 \
 	DS:bytes_in:DERIVE:10:U:U \
 	DS:bytes_out:DERIVE:10:U:U \

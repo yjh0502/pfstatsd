@@ -16,7 +16,6 @@
 #include <libgen.h>
 #include <limits.h>
 #include <netdb.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,8 +27,26 @@
 
 const char *pf_device = "/dev/pf";
 const char *rrdcached_addr = "/var/run/rrd/rrdcached.sock";
-const char *rrd_filename = "/var/db/rrd/pf.rrd";
+char *rrd_filename = "/var/db/rrd";
 struct subnetrepr repr;
+int simple = 0, dryrun = 0, verbose = 0;
+
+#define MAX_INTERFACES 16
+
+struct pfstats {
+  u_int64_t packets[2];
+  u_int64_t bytes[2];
+};
+
+struct ifstat {
+  char ifname[IFNAMSIZ];
+  char rrd_filename[PATH_MAX];
+  struct pfstats stats_acc;
+  int last_ts;
+};
+
+static struct ifstat *ifstats = NULL;
+static int if_count = 0;
 
 void print_addr(sa_family_t af, void *src);
 
@@ -99,11 +116,6 @@ int subnetrepr_match(struct subnetrepr *repr, struct pf_addr *addr) {
   return 0;
 }
 
-struct pfstats {
-  u_int64_t packets[2];
-  u_int64_t bytes[2];
-};
-
 void stats_fill(struct pfstats *stats, struct pfsync_state *state) {
   for (int i = 0; i < 2; i++) {
     bcopy(state->packets[i], &stats->packets[i], sizeof(u_int64_t));
@@ -172,6 +184,42 @@ void print_addr(sa_family_t af, void *src) {
     printf("%s", buf);
 }
 
+static void parse_interfaces(const char *list) {
+  if (list == NULL || *list == '\0')
+    return;
+
+  char *tmp = strdup(list);
+  if (tmp == NULL)
+    err(1, "strdup");
+
+  int count = 0;
+  for (char *p = strtok(tmp, ","); p != NULL; p = strtok(NULL, ","))
+    count++;
+
+  free(tmp);
+  tmp = strdup(list);
+  if (tmp == NULL)
+    err(1, "strdup");
+
+  ifstats = calloc(count, sizeof(struct ifstat));
+  if (ifstats == NULL)
+    err(1, "calloc");
+
+  int idx = 0;
+  for (char *p = strtok(tmp, ","); p != NULL; p = strtok(NULL, ",")) {
+    strlcpy(ifstats[idx].ifname, p, sizeof(ifstats[idx].ifname));
+    snprintf(ifstats[idx].rrd_filename, sizeof(ifstats[idx].rrd_filename),
+        "%s/pf-%s.rrd", rrd_filename, ifstats[idx].ifname);
+    idx++;
+  }
+
+  rrd_filename = strdup(rrd_filename);
+  rrd_filename = strcat(rrd_filename, "/pf.rrd");
+
+  if_count = count;
+  free(tmp);
+}
+
 int pfsync_state_cmp_id(const void *p0, const void *p1) {
   struct pfsync_state *s0 = (struct pfsync_state *)p0;
   struct pfsync_state *s1 = (struct pfsync_state *)p1;
@@ -221,7 +269,9 @@ void state_print_debug(struct pfsync_state *s) {
   }
 
   state_print_key(nk, 0);
-  printf(" ");
+  printf(" (");
+  print_addr(AF_INET, &s->rt_addr);
+  printf(") ");
 
   struct pfstats stats;
   stats_fill(&stats, s);
@@ -263,6 +313,7 @@ void acct_for(struct pf_addr *src, struct pf_addr *dst, u_int64_t bytes,
     return;
   }
 
+
   if (src_local) {
     stats->bytes[0] += bytes;
     stats->packets[0] += packets;
@@ -275,7 +326,8 @@ void acct_for(struct pf_addr *src, struct pf_addr *dst, u_int64_t bytes,
 void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
                 struct pfsync_state *prev) {
   struct pfsync_state *s = cur != NULL ? cur : prev;
-  if (!state_simple(s)) {
+
+  if (simple != state_simple(s)) {
     return;
   }
 
@@ -309,6 +361,12 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   if (bytes > 0) {
     ks = &s->key[afto ? PF_SK_STACK : PF_SK_WIRE];
     acct_for(&ks->addr[1], &ks->addr[0], bytes, packets, stats);
+    for (int i = 0; i < if_count; i++) {
+      if (strcmp(ifstats[i].ifname, s->ifname) == 0) {
+        acct_for(&ks->addr[1], &ks->addr[0], bytes, packets,
+                 &ifstats[i].stats_acc);
+      }
+    }
   }
 
   bytes = (dir == PF_OUT) ? stats_cur.bytes[1] : stats_cur.bytes[0];
@@ -316,6 +374,12 @@ void states_cmp(struct pfstats *stats, struct pfsync_state *cur,
   if (bytes > 0) {
     ks = &s->key[PF_SK_STACK];
     acct_for(&ks->addr[0], &ks->addr[1], bytes, packets, stats);
+    for (int i = 0; i < if_count; i++) {
+      if (strcmp(ifstats[i].ifname, s->ifname) == 0) {
+        acct_for(&ks->addr[0], &ks->addr[1], bytes, packets,
+                 &ifstats[i].stats_acc);
+      }
+    }
   }
 }
 
@@ -383,19 +447,21 @@ void send_counter(int sockfd, struct sockaddr_in *addr, const char *name,
 __dead void usage(void) {
   extern char *__progname;
 
-  fprintf(stderr, "usage: %s [-n network] [-d]", __progname);
+  fprintf(stderr,
+          "usage: %s [-n network] [-r rrdfile] [-i iface,iface...] [-d]\n",
+          __progname);
   exit(1);
 }
 
-void rrd_update_stats(rrd_client_t *client, struct pfstats stats, int ts) {
+void rrd_update_stats(rrd_client_t *client, const char *filename,
+                      struct pfstats stats, int ts, int *last_ts) {
   int ret;
   char buf[1024];
 
-  static int last_ts = 0;
-  if (ts < last_ts) {
+  if (last_ts && ts < *last_ts)
     return;
-  }
-  last_ts = ts;
+  if (last_ts)
+    *last_ts = ts;
 
   ret = snprintf(buf, sizeof(buf), "%d:%llu:%llu:%llu:%llu", ts, stats.bytes[0],
                  stats.bytes[1], stats.packets[0], stats.packets[1]);
@@ -404,24 +470,48 @@ void rrd_update_stats(rrd_client_t *client, struct pfstats stats, int ts) {
     errx(1, "snprintf");
   }
 
-  const char *updates[1] = {buf};
-  if ((ret = rrd_client_update(client, rrd_filename, 1, updates))) {
-    warn("rrd_client_update: %d", ret);
+  if (verbose) {
+    printf("%s: %s\n", filename, buf);
   }
-  if ((ret = rrd_client_flush(client, rrd_filename))) {
+  
+  if (dryrun) {
+    return;
+  }
+
+  const char *updates[1] = {buf};
+  if ((ret = rrd_client_update(client, filename, 1, updates))) {
+    warn("rrd_client_update: %d, %s", ret, rrd_get_error());
+  }
+  if ((ret = rrd_client_flush(client, filename))) {
     errx(ret, "rrd_client_flush");
   }
 }
 
 int main(int argc, char *argv[]) {
   char *addr = NULL;
+  char *iface_list = NULL;
   int ret, ch;
   int daemonize = 1;
 
-  while ((ch = getopt(argc, argv, "dn:")) != -1) {
+  while ((ch = getopt(argc, argv, "sfdvr:n:i:")) != -1) {
     switch (ch) {
-    case 'd':
+    case 's':
+      simple = 1;
+      continue;
+    case 'f':
       daemonize = 0;
+      continue;
+    case 'd':
+      dryrun = 1;
+      continue;
+    case 'v':
+      verbose = 1;
+      continue;
+    case 'r':
+      rrd_filename = strdup(optarg);
+      continue;
+    case 'i':
+      iface_list = strdup(optarg);
       continue;
     case 'n':
       addr = strdup(optarg);
@@ -438,6 +528,7 @@ int main(int argc, char *argv[]) {
 
   memset(&repr, 0, sizeof(struct subnetrepr));
   subnetrepr_parse(&repr, addr);
+  parse_interfaces(iface_list);
 
   int dev = -1;
   int mode = O_RDONLY;
@@ -470,6 +561,7 @@ int main(int argc, char *argv[]) {
 
   struct pfstats stats, stats_acc;
   memset(&stats_acc, 0, sizeof(stats_acc));
+  int last_ts_total = 0;
 
   // warm up
   if (pfctl_state_get(dev, ps_prev) == -1) {
@@ -504,7 +596,11 @@ int main(int argc, char *argv[]) {
 
     stats_add(&stats_acc, &stats);
 
-    rrd_update_stats(client, stats_acc, tv_now.tv_sec);
+    rrd_update_stats(client, rrd_filename, stats_acc, tv_now.tv_sec,
+                     &last_ts_total);
+    for (int i = 0; i < if_count; i++)
+      rrd_update_stats(client, ifstats[i].rrd_filename, ifstats[i].stats_acc,
+                       tv_now.tv_sec, &ifstats[i].last_ts);
 
     // swap buffer
     tmp = ps;
@@ -523,7 +619,8 @@ int main(int argc, char *argv[]) {
         }
       }
     } else {
-      warn("tv_now(%lld.%06ld) > tv(%lld.%06ld)", tv_now.tv_sec, tv_now.tv_usec, tv.tv_sec, tv.tv_usec);
+      warn("tv_now(%lld.%06ld) > tv(%lld.%06ld)", tv_now.tv_sec, tv_now.tv_usec,
+           tv.tv_sec, tv.tv_usec);
     }
 
     timeradd(&tv, &tv_interval, &tv);
