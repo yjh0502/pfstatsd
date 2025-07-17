@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/local/bin/bash
 
 NAME="${1:-pf.rrd}"
 rrdtool \

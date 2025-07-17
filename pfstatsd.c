@@ -214,7 +214,7 @@ static void parse_interfaces(const char *list) {
   }
 
   rrd_filename = strdup(rrd_filename);
-  rrd_filename = strcat(rrd_filename, "/pf.rrd");
+  rrd_filename = strcat(rrd_filename, "/pf-all.rrd");
 
   if_count = count;
   free(tmp);
