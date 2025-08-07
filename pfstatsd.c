@@ -16,6 +16,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <netdb.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +33,17 @@ struct subnetrepr repr;
 int simple = 0, dryrun = 0, verbose = 0;
 
 #define MAX_INTERFACES 16
+
+void info(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+
+  /* prepend program name and convert priority to text if you like */
+  vfprintf(stdout, fmt, ap);
+  fputc('\n', stdout);
+
+  va_end(ap);
+}
 
 struct pfstats {
   u_int64_t packets[2];
@@ -461,6 +473,8 @@ __dead void usage(int status) {
 }
 
 static int rrd_create_file(rrd_client_t *client, const char *filename) {
+  info("rrd_create_file: %s", filename);
+
   const char *argv[] = {
       "DS:bytes_in:DERIVE:10:U:U",   "DS:bytes_out:DERIVE:10:U:U",
       "DS:packets_in:DERIVE:10:U:U", "DS:packets_out:DERIVE:10:U:U",
@@ -469,10 +483,14 @@ static int rrd_create_file(rrd_client_t *client, const char *filename) {
   };
 
   int ret;
-  ret = rrd_client_create(client, filename, 1, 0, 0,
+  time_t now = time(NULL);
+  ret = rrd_client_create(client, filename, 1, now - 3600, 0,
                           sizeof(argv) / sizeof(argv[0]), argv);
-  if (ret)
+
+  if (ret) {
     warn("rrd_client_create: %d, %s", ret, rrd_get_error());
+  }
+
   return ret;
 }
 
