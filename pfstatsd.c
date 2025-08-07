@@ -460,6 +460,22 @@ __dead void usage(int status) {
   exit(status);
 }
 
+static int rrd_create_file(rrd_client_t *client, const char *filename) {
+  const char *argv[] = {
+      "DS:bytes_in:DERIVE:10:U:U",   "DS:bytes_out:DERIVE:10:U:U",
+      "DS:packets_in:DERIVE:10:U:U", "DS:packets_out:DERIVE:10:U:U",
+      "RRA:AVERAGE:0.5:1:86400",     "RRA:AVERAGE:0.5:10:86400",
+      "RRA:AVERAGE:0.5:60:40320",    "RRA:AVERAGE:0.5:3600:87600",
+  };
+
+  int ret;
+  ret = rrd_client_create(client, filename, 1, 0, 0,
+                          sizeof(argv) / sizeof(argv[0]), argv);
+  if (ret)
+    warn("rrd_client_create: %d, %s", ret, rrd_get_error());
+  return ret;
+}
+
 void rrd_update_stats(rrd_client_t *client, const char *filename,
                       struct pfstats stats, int ts, int *last_ts) {
   int ret;
@@ -486,8 +502,16 @@ void rrd_update_stats(rrd_client_t *client, const char *filename,
   }
 
   const char *updates[1] = {buf};
-  if ((ret = rrd_client_update(client, filename, 1, updates))) {
+  ret = rrd_client_update(client, filename, 1, updates);
+  if (ret) {
+    if (access(filename, F_OK) != 0 && errno == ENOENT) {
+      if (rrd_create_file(client, filename) == 0)
+        ret = rrd_client_update(client, filename, 1, updates);
+    }
+  }
+  if (ret) {
     warn("rrd_client_update: %d, %s", ret, rrd_get_error());
+    return;
   }
   if ((ret = rrd_client_flush(client, filename))) {
     errx(ret, "rrd_client_flush");
