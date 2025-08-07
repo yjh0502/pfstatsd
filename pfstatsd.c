@@ -442,13 +442,22 @@ void send_counter(int sockfd, struct sockaddr_in *addr, const char *name,
   }
 }
 
-__dead void usage(void) {
+__dead void usage(int status) {
   extern char *__progname;
+  FILE *out = status == 0 ? stdout : stderr;
 
-  fprintf(stderr,
-          "usage: %s [-n network] [-r rrdfile] [-i iface,iface...] [-d]\n",
-          __progname);
-  exit(1);
+  fprintf(out, "Usage: %s [options] -n network\n", __progname);
+  fprintf(out, "Options:\n");
+  fprintf(out, "  -n network    subnet to monitor (required)\n");
+  fprintf(out, "  -r rrdfile    path to RRD file\n");
+  fprintf(out, "  -i iface,...  comma-separated interface list\n");
+  fprintf(out, "  -s            count only simple flows\n");
+  fprintf(out, "  -f            stay in foreground\n");
+  fprintf(out, "  -d            dry run, do not update RRD\n");
+  fprintf(out, "  -v            verbose output\n");
+  fprintf(out, "  -h            display this help and exit\n");
+
+  exit(status);
 }
 
 void rrd_update_stats(rrd_client_t *client, const char *filename,
@@ -491,8 +500,11 @@ int main(int argc, char *argv[]) {
   int ret, ch;
   int daemonize = 1;
 
-  while ((ch = getopt(argc, argv, "sfdvr:n:i:")) != -1) {
+  while ((ch = getopt(argc, argv, "hsfdvr:n:i:")) != -1) {
     switch (ch) {
+    case 'h':
+      usage(0);
+      /* NOTREACHED */
     case 's':
       simple = 1;
       continue;
@@ -516,12 +528,12 @@ int main(int argc, char *argv[]) {
       continue;
     default:
       /* NOTREACHED */
-      usage();
+      usage(1);
     }
   }
 
   if (addr == NULL) {
-    usage();
+    usage(1);
   }
 
   memset(&repr, 0, sizeof(struct subnetrepr));
